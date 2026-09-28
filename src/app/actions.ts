@@ -1,14 +1,14 @@
 "use server";
 
 import { eq, inArray, lt } from "drizzle-orm";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
 import { timingSafeEqual } from "node:crypto";
 import { adminPassword, createSession, destroySession, isAdmin } from "@/lib/auth";
 import { currentClass, currentClassId } from "@/lib/classes";
 import { schoolYearOf, todayVN } from "@/lib/dates";
 import { getDb, schema } from "@/lib/db";
-import { listClasses, listMembers, listWeeks } from "@/lib/data";
+import { DATA_TAG, listClasses, listMembers, listWeeks } from "@/lib/data";
 import { defaultTitle } from "@/lib/titles";
 import { fingerprint } from "@/lib/fingerprint";
 import { computeStats, generateSchedule, type SchedMember } from "@/lib/scheduler";
@@ -22,6 +22,7 @@ function str(fd: FormData, k: string): string {
 }
 
 function revalidateAll() {
+  updateTag(DATA_TAG);
   revalidatePath("/", "layout");
 }
 

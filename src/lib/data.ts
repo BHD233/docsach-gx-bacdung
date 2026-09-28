@@ -1,6 +1,13 @@
 import "server-only";
 import { and, asc, gte, lte } from "drizzle-orm";
+import { unstable_cache } from "next/cache";
 import { getDb, schema } from "./db";
+
+/** Mọi dữ liệu đọc đều được cache với tag này; server action gọi updateTag(DATA_TAG) sau khi ghi. */
+export const DATA_TAG = "data";
+// Lưới an toàn khi DB bị sửa ngoài app (script nhập dữ liệu): tự làm mới sau 10 phút.
+const cached = <A extends unknown[], R>(fn: (...args: A) => Promise<R>, key: string) =>
+  unstable_cache(fn, [key], { tags: [DATA_TAG], revalidate: 600 });
 
 export interface SiteSettings {
   siteTitle: string;
@@ -17,7 +24,7 @@ export const DEFAULT_SETTINGS: SiteSettings = {
   nameStyle: "1",
 };
 
-export async function getSettings(): Promise<SiteSettings> {
+async function getSettingsRaw(): Promise<SiteSettings> {
   const db = await getDb();
   const rows = await db.select().from(schema.settings);
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
@@ -29,7 +36,7 @@ export async function getSettings(): Promise<SiteSettings> {
   };
 }
 
-export async function listClasses() {
+async function listClassesRaw() {
   const db = await getDb();
   return db
     .select()
@@ -37,12 +44,12 @@ export async function listClasses() {
     .orderBy(asc(schema.classLevels.sortOrder), asc(schema.classLevels.id));
 }
 
-export async function listMembers() {
+async function listMembersRaw() {
   const db = await getDb();
   return db.select().from(schema.members).orderBy(asc(schema.members.id));
 }
 
-export async function listCatechists() {
+async function listCatechistsRaw() {
   const db = await getDb();
   return db
     .select()
@@ -50,7 +57,7 @@ export async function listCatechists() {
     .orderBy(asc(schema.catechists.sortOrder), asc(schema.catechists.id));
 }
 
-export async function listWeeks(start?: string, end?: string) {
+async function listWeeksRaw(start?: string, end?: string) {
   const db = await getDb();
   const conds = [];
   if (start) conds.push(gte(schema.weeks.date, start));
@@ -61,3 +68,9 @@ export async function listWeeks(start?: string, end?: string) {
     .where(conds.length ? and(...conds) : undefined)
     .orderBy(asc(schema.weeks.date));
 }
+
+export const getSettings = cached(getSettingsRaw, "settings");
+export const listClasses = cached(listClassesRaw, "classes");
+export const listMembers = cached(listMembersRaw, "members");
+export const listCatechists = cached(listCatechistsRaw, "catechists");
+export const listWeeks = cached(listWeeksRaw, "weeks");

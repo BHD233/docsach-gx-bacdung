@@ -24,6 +24,9 @@ async function createDb(): Promise<DB> {
   if (url) {
     const { neon } = await import("@neondatabase/serverless");
     const { drizzle } = await import("drizzle-orm/neon-http");
+    // Chỉ ghi khu vực (VD ap-southeast-1) để đối chiếu với region của Vercel Functions
+    const region = new URL(url).hostname.match(/(?:us|eu|ap|sa|ca|me|af)-[a-z]+-\d/)?.[0] ?? "unknown";
+    console.log(`[db] neon region=${region} function region=${process.env.VERCEL_REGION ?? "local"}`);
     return drizzle(neon(url), { schema });
   }
   if (process.env.VERCEL) {
@@ -40,8 +43,18 @@ async function createDb(): Promise<DB> {
   return drizzle(client, { schema }) as unknown as DB;
 }
 
+// Tăng số này khi đổi cấu trúc bảng trong ddl.ts
+const SCHEMA_VERSION = "1";
+
 async function init(): Promise<DB> {
   const db = await createDb();
+  // Đường nhanh: DB đã được khởi tạo → chỉ tốn 1 truy vấn
+  try {
+    const v = await db.execute(sql`SELECT value FROM settings WHERE key = 'schema_version'`);
+    if ((v.rows[0] as { value?: string } | undefined)?.value === SCHEMA_VERSION) return db;
+  } catch {
+    // bảng chưa tồn tại
+  }
   for (const stmt of DDL) await db.execute(sql.raw(stmt));
   const seeded = await db.execute(sql`SELECT value FROM settings WHERE key = 'seeded'`);
   if (seeded.rows.length === 0) {
@@ -51,11 +64,12 @@ async function init(): Promise<DB> {
         DEFAULT_CLASSES.map((name, i) => ({ name, sortOrder: i })),
       );
     }
-    await db
-      .insert(schema.settings)
-      .values({ key: "seeded", value: "1" })
-      .onConflictDoNothing();
+    await db.insert(schema.settings).values({ key: "seeded", value: "1" }).onConflictDoNothing();
   }
+  await db
+    .insert(schema.settings)
+    .values({ key: "schema_version", value: SCHEMA_VERSION })
+    .onConflictDoUpdate({ target: schema.settings.key, set: { value: SCHEMA_VERSION } });
   return db;
 }
 
