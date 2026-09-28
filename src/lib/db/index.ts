@@ -24,9 +24,6 @@ async function createDb(): Promise<DB> {
   if (url) {
     const { neon } = await import("@neondatabase/serverless");
     const { drizzle } = await import("drizzle-orm/neon-http");
-    // Chỉ ghi khu vực (VD ap-southeast-1) để đối chiếu với region của Vercel Functions
-    const region = new URL(url).hostname.match(/(?:us|eu|ap|sa|ca|me|af)-[a-z]+-\d/)?.[0] ?? "unknown";
-    console.log(`[db] neon region=${region} function region=${process.env.VERCEL_REGION ?? "local"}`);
     return drizzle(neon(url), { schema });
   }
   if (process.env.VERCEL) {
