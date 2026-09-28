@@ -102,7 +102,6 @@ export default function ScheduleEditor({
   const badCells = new Set(violations.flatMap((v) => v.memberIds.map((id) => `${v.date}:${id}`)));
   const stats = useMemo(() => computeStats(sched, timeline), [sched, timeline]);
   const totals = useMemo(() => new Map(stats.map((s) => [s.id, s.total])), [stats]);
-  const minEffective = stats.length ? Math.min(...stats.map((s) => s.effective)) : 0;
   const windowCount = useMemo(() => {
     const c = new Map<number, number>();
     for (const r of liveRows) for (const id of [r.reading1Id, r.reading2Id, r.prayerId]) if (id) c.set(id, (c.get(id) ?? 0) + 1);
@@ -128,7 +127,7 @@ export default function ScheduleEditor({
     if (v.kind === "fairness" && v.waitingIds) {
       const waiting = new Set(v.waitingIds);
       const repeaters = v.memberIds.filter((id) => !waiting.has(id));
-      return `${names(repeaters)} đọc lần nữa trong khi ${names(v.waitingIds)} chưa được đọc vòng này.`;
+      return `${names(repeaters)} được xếp đọc trong khi ${names(v.waitingIds)} chờ lâu hơn.`;
     }
     const msg = v.message.replace(/^Ngày \d{1,2}\/\d{1,2}:\s*/, "");
     const cap = msg.charAt(0).toLocaleUpperCase("vi-VN") + msg.slice(1);
@@ -346,8 +345,8 @@ export default function ScheduleEditor({
         )}
         {violations.length === 0 && hasAssignments && (
           <div className="rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">
-            ✓ Lịch hợp lệ: đủ nam/nữ ở Bài đọc 1 & 2, không ai đọc 2 lần trong 7 ngày, không ai đọc Lời nguyện 3 lần
-            liên tiếp, số lần đọc chênh lệch tối đa 1.
+            ✓ Lịch hợp lệ: đúng thứ tự hàng chờ (ai chờ lâu đọc trước), đủ nam/nữ ở Bài đọc 1 & 2, không ai đọc 2 lần trong
+            7 ngày, không ai đọc Lời nguyện 3 lần liên tiếp.
           </div>
         )}
 
@@ -461,7 +460,7 @@ export default function ScheduleEditor({
 
       <aside className="card h-fit p-4 lg:sticky lg:top-20">
         <h2 className="font-bold">Thống kê số lần đọc</h2>
-        <p className="text-xs text-stone-500">Tính cả lịch đã lưu và lịch đang chỉnh. “Kỳ này” là số lần trong 2 tháng. “Đến lượt” = chưa đọc trong vòng hiện tại (vòng xong khi tất cả đã đọc 1 lần).</p>
+        <p className="text-xs text-stone-500">Tính cả lịch đã lưu và lịch đang chỉnh. “Kỳ này” là số lần trong 2 tháng. Xếp theo hàng chờ: em chờ lâu nhất ở trên. “Đến lượt” = 3 em đầu hàng sau lịch đang chỉnh.</p>
         <div className="mt-3 max-h-[70vh] overflow-y-auto">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-white text-xs text-stone-500">
@@ -482,7 +481,7 @@ export default function ScheduleEditor({
                 )
                 .map((s) => {
                   const m = byId.get(s.id);
-                  const due = s.effective === minEffective;
+                  const due = s.effective < 3;
                   return (
                     <tr key={s.id}>
                       <td className="py-1">

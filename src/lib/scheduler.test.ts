@@ -23,18 +23,60 @@ function sundays(start: string, n: number): string[] {
   return Array.from({ length: n }, (_, i) => new Date(t0 + i * 7 * 86400000).toISOString().slice(0, 10));
 }
 
-/** Spread of RAW fairness counts (baseCount + real reads), i.e. without the lift. */
-function spread(members: SchedMember[], weeks: WeekAssignment[]): number {
-  const base = new Map(members.map((m) => [m.id, m.baseCount]));
-  const eff = computeStats(members, weeks).map((s) => s.total + base.get(s.id)!);
-  return Math.max(...eff) - Math.min(...eff);
+/** Queue fairness over the whole timeline: validateSchedule reports no 'fairness' violation. */
+function assertInvariantEachWeek(members: SchedMember[], weeks: WeekAssignment[]) {
+  const v = validateSchedule(members, weeks).filter((x) => x.kind === 'fairness');
+  assert.deepEqual(v, [], 'queue fairness broken');
 }
 
-/** Fairness invariant after every week of the timeline. */
-function assertInvariantEachWeek(members: SchedMember[], weeks: WeekAssignment[]) {
-  const sorted = weeks.slice().sort((a, b) => a.date.localeCompare(b.date));
-  for (let i = 1; i <= sorted.length; i++) {
-    assert.ok(spread(members, sorted.slice(0, i)) <= 1, `fairness broken after ${sorted[i - 1].date}`);
+/**
+ * Independent brute force: every generated week must be the lexicographically earliest
+ * (sorted queue-rank vector) triple that satisfies all hard rules.
+ */
+function assertLexEarliest(members: SchedMember[], history: WeekAssignment[], weeks: WeekAssignment[]) {
+  const day = (d: string) => Date.parse(d + 'T00:00:00Z') / 86400000;
+  const roles = ['reading1', 'reading2', 'prayer'] as const;
+  const male = new Map(members.map((m) => [m.id, m.gender === 'M']));
+  const timeline = history.slice().sort((a, b) => a.date.localeCompare(b.date));
+  for (const w of weeks) {
+    const d = day(w.date);
+    const last = new Map<number, number>();
+    const seq = new Map<number, string[]>();
+    const recent = new Set<number>();
+    for (const h of timeline)
+      for (const r of roles) {
+        const x = h[r];
+        if (x == null) continue;
+        last.set(x, Math.max(last.get(x) ?? -Infinity, day(h.date)));
+        seq.set(x, [...(seq.get(x) || []), r]);
+        if (d - day(h.date) > 0 && d - day(h.date) <= 7) recent.add(x);
+      }
+    const lr = (x: number) => last.get(x) ?? -Infinity;
+    const rank = (x: number) => members.filter((m) => lr(m.id) < lr(x)).length;
+    const streak = (x: number) => {
+      const q = seq.get(x) || [];
+      return q.length >= 2 && q[q.length - 1] === 'prayer' && q[q.length - 2] === 'prayer';
+    };
+    const legal = (t: number[]) =>
+      t.every((x) => !recent.has(x)) &&
+      t.some((p) => {
+        const rs = t.filter((x) => x !== p);
+        return !streak(p) && male.get(rs[0]) !== male.get(rs[1]);
+      });
+    const vec = (t: number[]) => t.map(rank).sort((a, b) => a - b);
+    const less = (a: number[], b: number[]) => a[0] < b[0] || (a[0] === b[0] && (a[1] < b[1] || (a[1] === b[1] && a[2] < b[2])));
+    let best: number[] | null = null;
+    const ids = members.map((m) => m.id);
+    for (let i = 0; i < ids.length; i++)
+      for (let j = i + 1; j < ids.length; j++)
+        for (let k = j + 1; k < ids.length; k++) {
+          const t = [ids[i], ids[j], ids[k]];
+          if (!legal(t)) continue;
+          const v = vec(t);
+          if (!best || less(v, best)) best = v;
+        }
+    assert.deepEqual(vec([w.reading1!, w.reading2!, w.prayer!]), best, `week ${w.date} is not the earliest feasible set`);
+    timeline.push(w);
   }
 }
 
@@ -42,7 +84,9 @@ function assertStrict(res: GenerateResult, members: SchedMember[], history: Week
   assert.equal(res.weeks.length, n);
   assert.deepEqual(res.relaxed, { gender: false, consecutive: false, prayer: false });
   assert.deepEqual(res.warnings, []);
-  assert.deepEqual(validateSchedule(members, [...history, ...res.weeks]), []);
+  // (history itself may be unfair/hand-edited; only the generated dates must be clean)
+  const genDates = new Set(res.weeks.map((w) => w.date));
+  assert.deepEqual(validateSchedule(members, [...history, ...res.weeks]).filter((v) => genDates.has(v.date)), []);
 }
 
 test('20 kids (10M/10F), 9 weeks, no history: all hard rules hold', () => {
@@ -119,22 +163,24 @@ test('skewed genders 5M/10F (exactly 1/3 boys) are strict for 9 weeks', () => {
   assertStrict(res, members, [], 9);
 });
 
-test('3M/15F: not enough boys for fairness + mixed pairs -> gender relaxed, fairness kept', () => {
-  // With fairness, 3 of 18 kids can cover at most ~6 of 9 reading weeks, so some weeks must be 2 girls.
+test('3M/15F: queue lets the scarce boys read more often, so rules stay strict', () => {
   const members = makeMembers(3, 15);
-  const dates = sundays('2026-10-04', 9);
-  const res = generateSchedule({ members, history: [], dates, seed: 5 });
-  assert.equal(res.weeks.length, 9);
-  assert.equal(res.relaxed.gender, true);
-  assert.equal(res.relaxed.consecutive, false);
-  assert.ok(res.warnings.length > 0);
+  const res = generateSchedule({ members, history: [], dates: sundays('2026-10-04', 9), seed: 5 });
+  assertStrict(res, members, [], 9);
+  assertLexEarliest(members, [], res.weeks);
+});
+
+test('1M/10F: the only boy cannot read two Sundays in a row -> gender relaxed on the other weeks', () => {
+  const members = makeMembers(1, 10);
+  const res = generateSchedule({ members, history: [], dates: sundays('2026-10-04', 8), seed: 5 });
+  assert.equal(res.weeks.length, 8);
+  assert.deepEqual(res.relaxed, { gender: true, consecutive: false, prayer: false });
+  const boyWeeks = res.weeks.filter((w) => [w.reading1, w.reading2].includes(1)).length;
+  assert.equal(boyWeeks, 4); // every other week
+  assert.equal(res.warnings.length, 4);
   assert.ok(res.warnings.every((w) => w.includes('Không đủ bạn nam/nữ')));
   const v = validateSchedule(members, res.weeks);
   assert.ok(v.every((x) => x.kind === 'gender'), JSON.stringify(v));
-  // mixed pairs used whenever the fairness pool allows: boys used 6 times (the max possible)
-  const boysReading = res.weeks.filter((w) => w.reading1 <= 3 || w.reading2 <= 3).length;
-  assert.ok(boysReading >= 6, `boys used in ${boysReading} weeks`);
-  assertInvariantEachWeek(members, res.weeks);
 });
 
 test('all girls -> relaxed.gender with a single explanatory warning', () => {
@@ -177,24 +223,22 @@ test('fewer than 3 members -> no weeks, warning, no throw', () => {
   assert.deepEqual(empty.weeks, []);
 });
 
-test('latecomers join the current round: due once, no catch-up (baseCount ignored for fairness)', () => {
+test('newcomer (never read) goes to the front of the queue; baseCount is ignored', () => {
   const originals = makeMembers(5, 5, 1);
-  const late = makeMembers(1, 1, 100, 7); // big baseCount must not matter any more
+  const late = makeMembers(1, 1, 100, 7); // big baseCount must not matter
   const members = [...originals, ...late];
   const pre = generateSchedule({ members: originals, history: [], dates: sundays('2026-07-05', 12), seed: 2 });
   for (let seed = 0; seed < 10; seed++) {
     const res = generateSchedule({ members, history: pre.weeks, dates: sundays('2026-10-04', 9), seed });
-    assert.equal(res.weeks.length, 9);
     assert.deepEqual(res.relaxed, { gender: false, consecutive: false, prayer: false });
+    // (pre-history is flagged for the newcomers, who did not exist yet; only check the new weeks)
     const genDates = new Set(res.weeks.map((w) => w.date));
     assert.deepEqual(validateSchedule(members, [...pre.weeks, ...res.weeks]).filter((v) => genDates.has(v.date)), []);
-    // history never completed a round with the latecomers, so they are the only due kids:
-    // both read on 04/10, then they simply rotate with everyone else (no extra readings)
     const w0 = res.weeks[0];
-    for (const id of [100, 101]) assert.ok([w0.reading1, w0.reading2, w0.prayer].includes(id));
-    const st = computeStats(members, res.weeks);
-    // 27 picks = end of round 1 + two full rounds of 12 + start of round 4 -> at most 4 each
-    for (const x of st) assert.ok(x.total <= 4, `kid ${x.id} read ${x.total} times`);
+    for (const id of [100, 101]) assert.ok([w0.reading1, w0.reading2, w0.prayer].includes(id), `seed ${seed}`);
+    assertLexEarliest(members, pre.weeks, res.weeks);
+    // no catch-up: after their first reading the newcomers wait like everybody else
+    for (const x of computeStats(members, res.weeks).filter((x) => x.id >= 100)) assert.ok(x.total <= 3);
   }
 });
 
@@ -219,8 +263,8 @@ test('history with unknown ids (removed members) is ignored', () => {
   assert.ok(![w0.reading1, w0.reading2, w0.prayer].includes(6));
 });
 
-test('history violating fairness: the due kids finish the round, then a fresh round (no catch-up)', () => {
-  const members = makeMembers(5, 5);
+test('queue after an unfair history: never-read first, then the oldest readers', () => {
+  const members = makeMembers(5, 5); // 1-5 M, 6-10 F
   const history: WeekAssignment[] = [
     { date: '2026-09-06', reading1: 1, reading2: 6, prayer: 2 },
     { date: '2026-09-20', reading1: 1, reading2: 7, prayer: 3 },
@@ -228,39 +272,64 @@ test('history violating fairness: the due kids finish the round, then a fresh ro
   ];
   const hv = validateSchedule(members, history).filter((v) => v.kind === 'fairness');
   assert.deepEqual(hv.map((v) => v.date), ['2026-09-20', '2026-09-27']);
-  // round reconstruction: due = {5, 9, 10}
-  const st = computeStats(members, history);
-  assert.deepEqual(st.filter((x) => x.effective === 0).map((x) => x.id), [5, 9, 10]);
-  for (let seed = 0; seed < 10; seed++) {
+  // 27/09: kid 1 (read 20/09) reads again while boys 5 (never) and 2 (06/09) wait; 8 and 4 were first-timers
+  assert.deepEqual(hv[1].memberIds[0], 1);
+  assert.deepEqual(hv[1].waitingIds?.slice().sort((a, b) => a - b), [2, 5]);
+  // queue ranks: never-read 5/9/10 = 0; 06/09 readers 2/6 = 3; 20/09 = 5; 27/09 = 7
+  const eff = new Map(computeStats(members, history).map((x) => [x.id, x.effective]));
+  assert.deepEqual([5, 9, 10, 2, 6, 3, 7, 1, 4, 8].map((id) => eff.get(id)), [0, 0, 0, 3, 3, 5, 5, 7, 7, 7]);
+  const second = new Set<number>();
+  for (let seed = 0; seed < 20; seed++) {
     const res = generateSchedule({ members, history, dates: sundays('2026-10-04', 9), seed });
-    assert.deepEqual(res.relaxed, { gender: false, consecutive: false, prayer: false });
-    const genDates = new Set(res.weeks.map((w) => w.date));
-    assert.deepEqual(validateSchedule(members, [...history, ...res.weeks]).filter((x) => genDates.has(x.date)), []);
+    assertStrict(res, members, history, 9);
     const ids = (w: (typeof res.weeks)[number]) => [w.reading1, w.reading2, w.prayer];
     assert.deepEqual(ids(res.weeks[0]).sort((a, b) => a - b), [5, 9, 10]);
-    // new round: weeks 2-4 are 9 distinct kids (kid 1 has no extra "credit" or "debt")
-    assert.equal(new Set(res.weeks.slice(1, 4).flatMap(ids)).size, 9);
+    const w1 = ids(res.weeks[1]);
+    assert.ok(w1.includes(2) && w1.includes(6), `seed ${seed}: ${w1}`);
+    second.add(w1.find((x) => x !== 2 && x !== 6)!);
+    assertLexEarliest(members, history, res.weeks);
+  }
+  assert.deepEqual([...second].sort(), [3, 7]); // tie between 3 and 7 broken randomly
+});
+
+test('gender-scarce front of queue: a girl is skipped for the first boy and reads next week', () => {
+  // 6 girls (ids 1-6), 3 boys (ids 7-9); queue G1, G2, G3, B7, G4, B8, G5, G6, B9
+  const members: SchedMember[] = [
+    ...[1, 2, 3, 4, 5, 6].map((id) => ({ id, gender: 'F' as const, baseCount: 0 })),
+    ...[7, 8, 9].map((id) => ({ id, gender: 'M' as const, baseCount: 0 })),
+  ];
+  const order = [1, 2, 3, 7, 4, 8, 5, 6, 9];
+  const history: WeekAssignment[] = order.map((id, i) => ({ date: `2026-08-${String(i + 1).padStart(2, '0')}`, reading1: null, reading2: null, prayer: id }));
+  for (let seed = 0; seed < 10; seed++) {
+    const res = generateSchedule({ members, history, dates: sundays('2026-10-04', 4), seed });
+    assert.deepEqual(res.relaxed, { gender: false, consecutive: false, prayer: false });
+    const ids = (w: (typeof res.weeks)[number]) => [w.reading1, w.reading2, w.prayer].sort((a, b) => a - b);
+    assert.deepEqual(ids(res.weeks[0]), [1, 2, 7]); // G3 skipped: {G1,G2,G3} has no boy
+    assert.deepEqual(ids(res.weeks[1]), [3, 4, 8]); // G3 still at the front -> reads next week
+    const genDates = new Set(res.weeks.map((w) => w.date));
+    assert.deepEqual(validateSchedule(members, [...history, ...res.weeks]).filter((v) => genDates.has(v.date)), []);
+    assertLexEarliest(members, history, res.weeks);
   }
 });
 
-test('uneven history (real counts 1..5): only the kids missing from the current round are due', () => {
-  // 20 kids, mixed gender; history read in "rounds" r=0..4 by kids with count > r (60 reads, 20 weeks)
-  const members: SchedMember[] = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, gender: i % 2 ? 'F' : 'M', baseCount: 0 }));
-  const cnt = (id: number) => 1 + Math.floor((id - 1) / 4);
-  const reads: number[] = [];
-  for (let r = 0; r < 5; r++) for (let id = 1; id <= 20; id++) if (cnt(id) > r) reads.push(id);
-  const hDates = sundays('2026-05-17', 20);
-  const history: WeekAssignment[] = hDates.map((date, j) => ({ date, reading1: reads[3 * j], reading2: reads[3 * j + 1], prayer: reads[3 * j + 2] }));
-  // round 1 = everyone; round 2 so far = kids 5..20 -> due {1,2,3,4}
-  assert.deepEqual(computeStats(members, history).filter((x) => x.effective === 1).map((x) => x.id), [1, 2, 3, 4]);
+test('ties in the queue are broken randomly across seeds', () => {
+  const members = makeMembers(10, 10);
+  const firsts = new Set<string>();
+  for (let seed = 0; seed < 20; seed++) {
+    const res = generateSchedule({ members, history: [], dates: sundays('2026-10-04', 3), seed });
+    firsts.add(JSON.stringify([res.weeks[0].reading1, res.weeks[0].reading2, res.weeks[0].prayer].sort()));
+  }
+  assert.ok(firsts.size >= 10, `only ${firsts.size} distinct first weeks`);
+});
+
+test('feast days: a kid blocked by the 7-day rule keeps their place and reads right after', () => {
+  const members = makeMembers(6, 6);
+  const pre = generateSchedule({ members, history: [], dates: sundays('2026-10-04', 8), seed: 9 });
+  const dates = ['2026-12-06', '2026-12-13', '2026-12-20', '2026-12-24', '2026-12-25', '2026-12-27', '2027-01-03'];
   for (let seed = 0; seed < 10; seed++) {
-    const res = generateSchedule({ members, history, dates: sundays('2026-10-04', 9), seed });
-    assert.equal(res.weeks.length, 9);
-    const genDates = new Set(res.weeks.map((w) => w.date));
-    assert.deepEqual(validateSchedule(members, [...history, ...res.weeks]).filter((v) => genDates.has(v.date)), []);
-    const early = new Set(res.weeks.slice(0, 2).flatMap((w) => [w.reading1, w.reading2, w.prayer]));
-    for (const id of [1, 2, 3, 4]) assert.ok(early.has(id), `seed ${seed}: due kid ${id} not in first 2 weeks`);
-    for (const x of computeStats(members, res.weeks)) assert.ok(x.total <= 2, `seed ${seed}: kid ${x.id} read ${x.total} times`);
+    const res = generateSchedule({ members, history: pre.weeks, dates, seed });
+    assertStrict(res, members, pre.weeks, dates.length);
+    assertLexEarliest(members, pre.weeks, res.weeks);
   }
 });
 
@@ -286,48 +355,38 @@ const REAL_HISTORY: [string, (string | null)[]][] = [
   ['09-25', ['Thu Hà', null, 'Hoàng Nam']], ['09-27', ['Hải Anh', 'Mỹ Anh', 'Thanh Tâm']],
 ];
 
-test('real data: round reconstruction and Oct-Nov generation', () => {
+test('real data: waiting queue, Oct-Nov generation (19 active members)', () => {
   const idOf = new Map(REAL_MEMBERS.map(([name], i) => [name, i + 1]));
   const nameOf = new Map(REAL_MEMBERS.map(([name], i) => [i + 1, name]));
-  const members: SchedMember[] = REAL_MEMBERS.map(([, g], i) => ({ id: i + 1, gender: g, baseCount: 0 }));
+  const hidden = new Set(['Ngọc Hà', 'Anh Đào']); // no longer active
+  const members: SchedMember[] = REAL_MEMBERS.flatMap(([name, g], i) => (hidden.has(name) ? [] : [{ id: i + 1, gender: g, baseCount: 0 }]));
+  assert.equal(members.length, 19);
   const id = (n: string | null) => (n == null ? null : idOf.get(n)!);
   const history: WeekAssignment[] = REAL_HISTORY.map(([md, [a, b, c]]) => ({ date: `2026-${md}`, reading1: id(a), reading2: id(b), prayer: id(c) }));
-  const lastRead = new Map<number, string>();
-  for (const w of history) for (const x of [w.reading1, w.reading2, w.prayer]) if (x != null) lastRead.set(x, w.date);
 
-  // round 1 completes on 16/08 (Gia Bảo's first reading); due now = the kids with effective 1
-  const st = computeStats(members, history);
-  const due = st.filter((x) => x.effective === 1).map((x) => nameOf.get(x.id)).sort();
-  assert.deepEqual(due, ['Anh Đào', 'Gia Bảo', 'Ngọc Hà']);
-  assert.ok(st.every((x) => x.effective === 1 || x.effective === 2));
+  // queue front: Gia Bảo (M) & Khánh Linh (F) last read 16/08 (rank 0), Diệu Linh 23/08 (rank 2)
+  const eff = new Map(computeStats(members, history).map((x) => [nameOf.get(x.id), x.effective]));
+  assert.equal(eff.get('Gia Bảo'), 0);
+  assert.equal(eff.get('Khánh Linh'), 0);
+  assert.equal(eff.get('Diệu Linh'), 2);
+  assert.equal([...eff.values()].filter((e) => e <= 2).length, 3);
 
   const dates = sundays('2026-10-04', 9);
   assert.equal(dates[8], '2026-11-29');
-  let earlyBeforeLate = 0;
-  let comparisons = 0;
+  const variants = new Set<string>();
   for (let seed = 0; seed < 25; seed++) {
     const res = generateSchedule({ members, history, dates, seed });
-    assert.equal(res.weeks.length, 9);
     assert.deepEqual(res.relaxed, { gender: false, consecutive: false, prayer: false }, `seed ${seed}`);
+    assert.equal(res.weeks.length, 9);
     const genDates = new Set(res.weeks.map((w) => w.date));
     assert.deepEqual(validateSchedule(members, [...history, ...res.weeks]).filter((v) => genDates.has(v.date)), [], `seed ${seed}`);
-    // 04/10 = exactly the three due kids; Gia Bảo must be a reader (only boy)
     const w0 = res.weeks[0];
-    assert.deepEqual([w0.reading1, w0.reading2, w0.prayer].map((x) => nameOf.get(x)).sort(), ['Anh Đào', 'Gia Bảo', 'Ngọc Hà']);
-    assert.notEqual(w0.prayer, idOf.get('Gia Bảo'));
-    // Thiện Tâm (read 13/09) must not read on 04/10
-    assert.ok(![w0.reading1, w0.reading2, w0.prayer].includes(idOf.get('Thiện Tâm')!));
-    // round 3 starts 11/10: LRU -> kids last read up to 06/09 tend to come before kids who read 20/09-27/09
-    const pos = new Map<number, number>();
-    res.weeks.slice(1).forEach((w, i) => [w.reading1, w.reading2, w.prayer].forEach((x) => { if (!pos.has(x)) pos.set(x, i); }));
-    const early = members.filter((m) => (lastRead.get(m.id) ?? '') <= '2026-09-06' && !['Anh Đào', 'Gia Bảo', 'Ngọc Hà'].includes(nameOf.get(m.id)!));
-    const late = members.filter((m) => (lastRead.get(m.id) ?? '') >= '2026-09-20');
-    for (const a of early) for (const b of late) {
-      comparisons++;
-      if ((pos.get(a.id) ?? 99) < (pos.get(b.id) ?? 99)) earlyBeforeLate++;
-    }
+    assert.deepEqual([w0.reading1, w0.reading2, w0.prayer].map((x) => nameOf.get(x)).sort(), ['Diệu Linh', 'Gia Bảo', 'Khánh Linh']);
+    assert.notEqual(w0.prayer, idOf.get('Gia Bảo')); // only boy -> must be a reader
+    assertLexEarliest(members, history, res.weeks);
+    variants.add(JSON.stringify(res.weeks));
   }
-  assert.ok(earlyBeforeLate / comparisons > 0.75, `LRU preference too weak: ${earlyBeforeLate}/${comparisons}`);
+  assert.ok(variants.size > 5, 'ties should randomize the schedule');
 });
 
 test('deterministic with seed, varies without', () => {
@@ -391,21 +450,23 @@ test('validateSchedule detects each violation kind', () => {
   assert.ok(c.memberIds.includes(1));
 });
 
-test('computeStats counts roles, effective (rounds) and lastDate', () => {
+test('computeStats counts roles, effective (queue rank) and lastDate', () => {
   const members: SchedMember[] = [
     { id: 1, gender: 'M', baseCount: 2 },
     { id: 2, gender: 'F', baseCount: 0 },
     { id: 3, gender: 'F', baseCount: 0 },
+    { id: 4, gender: 'M', baseCount: 0 },
   ];
   const weeks: WeekAssignment[] = [
-    { date: '2026-10-11', reading1: 1, reading2: 2, prayer: 3 },
-    { date: '2026-10-04', reading1: 2, reading2: 1, prayer: 99 },
+    { date: '2026-10-11', reading1: 1, reading2: 2, prayer: null },
+    { date: '2026-10-04', reading1: 2, reading2: 1, prayer: 3 },
   ];
-  // 04/10: S={1,2}; 11/10: 3 completes round 1, repeaters 1 & 2 start round 2 -> effective 2,2,1
+  // lastRead: 4 never (rank 0), 3 04/10 (rank 1), 1 & 2 11/10 (tied, rank 2)
   const s = computeStats(members, weeks);
   assert.deepEqual(s[0], { id: 1, total: 2, effective: 2, reading1: 1, reading2: 1, prayer: 0, lastDate: '2026-10-11' });
-  assert.deepEqual(s[1].effective, 2);
-  assert.deepEqual(s[2], { id: 3, total: 1, effective: 1, reading1: 0, reading2: 0, prayer: 1, lastDate: '2026-10-11' });
+  assert.equal(s[1].effective, 2);
+  assert.deepEqual(s[2], { id: 3, total: 1, effective: 1, reading1: 0, reading2: 0, prayer: 1, lastDate: '2026-10-04' });
+  assert.deepEqual(s[3], { id: 4, total: 0, effective: 0, reading1: 0, reading2: 0, prayer: 0, lastDate: null });
 });
 
 // ---------------------------------------------------------------- prayer streak rule

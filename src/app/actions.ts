@@ -325,3 +325,17 @@ export async function saveWeeks(
   return { ok: true };
 }
 
+
+// ---------- Backup ----------
+
+export async function restoreFromBackup(text: string) {
+  await assertAdmin();
+  const { parseBackup, restoreBackup } = await import("@/lib/backup");
+  try {
+    const counts = await restoreBackup(parseBackup(text));
+    revalidateAll();
+    return { ok: true as const, counts };
+  } catch (e) {
+    return { ok: false as const, error: e instanceof Error ? e.message : "Khôi phục thất bại" };
+  }
+}

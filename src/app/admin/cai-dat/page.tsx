@@ -3,6 +3,7 @@ import { getSettings, listClasses, listMembers } from "@/lib/data";
 import { currentClass } from "@/lib/classes";
 import { schoolYearOf, todayVN } from "@/lib/dates";
 import { saveSettings } from "@/app/actions";
+import BackupPanel from "./BackupPanel";
 import ClassesEditor from "./ClassesEditor";
 
 export default async function SettingsPage() {
@@ -55,6 +56,7 @@ export default async function SettingsPage() {
           <button className="btn-primary">Lưu</button>
         </form>
       </section>
+      <BackupPanel />
     </div>
   );
 }

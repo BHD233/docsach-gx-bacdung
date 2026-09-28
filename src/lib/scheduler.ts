@@ -56,369 +56,31 @@ function dedupeMembers(members: SchedMember[]): SchedMember[] {
   }
   return out;
 }
-/**
- * Fairness = chronological rounds. `S` holds the members who already read in the
- * current round; the round completes when everyone is in S. Readings within one
- * entry are simultaneous: newcomers are added first; if that completes the round,
- * a new round starts and this entry's repeaters (already in the old S) seed it.
- * Returns true when a round completed. `readers` must be unique members.
- */
-function roundStep<T>(S: Set<T>, readers: T[], memberCount: number): boolean {
-  const repeaters = readers.filter((x) => S.has(x));
-  for (const x of readers) S.add(x);
-  if (S.size < memberCount) return false;
-  S.clear();
-  for (const x of repeaters) S.add(x);
-  return true;
-}
-function binom(n: number, k: number): number {
-  if (k < 0 || k > n) return 0;
-  let r = 1;
-  for (let i = 0; i < k; i++) r = (r * (n - i)) / (i + 1);
-  return Math.round(r);
-}
-
 // ---------------------------------------------------------------- generator
+//
+// Fairness = strict waiting queue (LRU). Each active member's lastRead is the date of
+// their most recent reading; the queue is never-read first, then oldest lastRead.
+// Each date takes the feasible triple whose sorted queue-rank vector is
+// lexicographically smallest: the front kid is always taken unless the hard rules
+// make it impossible (then they stay at the front for next time). Ties (same
+// lastRead) are broken randomly - the main source of randomness between clicks.
 
-interface Pick { r1: number; r2: number; p: number } // member indices
 interface Mode { genderHard: boolean; consecHard: boolean; prayerHard: boolean }
 interface WeekIssues { gender: boolean; consec: boolean; prayer: boolean }
+interface Assign { r1: number; r2: number; p: number; viol: number; issues: WeekIssues }
 
-const COMBO_LIMIT = 150; // triples examined per node
-const BRANCH = 10; // candidates kept per node
-const PENALTY = 1000; // soft-constraint penalty in relaxed modes
-const MAX_LOOKAHEAD = 4;
-const LRU_W = 8; // weight of the "least recently read first" preference
 const WINDOW = 7; // a kid may not read at two events whose dates are <= 7 days apart
-
-class Solver {
-  n: number;
-  W: number;
-  ids: number[];
-  male: boolean[];
-  inS: Set<number>; // current-round readers (member indices)
-  lastDay: number[]; // day number of each member's last reading (-Infinity = never)
-  sLog: Set<number>[];
-  lastLog: number[][];
-  role: number[][];
-  pair: Int32Array;
-  days: number[];
-  histByDay = new Map<number, number[]>();
-  sol: (Pick | null)[];
-  rng: () => number;
-  nodes = 0;
-  budget = 0;
-  aborted = false;
-  truncated = false;
-  deadline = Infinity;
-  realW: number;
-  mode: Mode = { genderHard: true, consecHard: true, prayerHard: true };
-  seq: number[][]; // per member: roles of their assignments in date order (0=r1, 1=r2, 2=prayer)
-  prayerViol: boolean[];
-  minorityMale = false;
-  scarcityW = 0;
-
-  constructor(members: SchedMember[], history: WeekAssignment[], dates: string[], rng: () => number) {
-    this.rng = rng;
-    this.n = members.length;
-    this.W = dates.length;
-    this.ids = members.map((m) => m.id);
-    this.male = members.map((m) => m.gender === 'M');
-    this.inS = new Set();
-    this.lastDay = members.map(() => -Infinity);
-    this.role = members.map(() => [0, 0, 0]);
-    this.pair = new Int32Array(this.n * this.n);
-    // When one gender is scarce, every week needs one of them as a reader, so
-    // "wasting" a second scarce kid in the same week (e.g. on prayer) is discouraged.
-    const nM = this.male.filter(Boolean).length;
-    const nMin = Math.min(nM, this.n - nM);
-    this.minorityMale = nM <= this.n - nM;
-    const r = nMin / this.n;
-    this.scarcityW = nMin > 0 && r < 0.45 ? (0.5 - r) * 25 + 20 : 0;
-    this.realW = dates.length;
-    // Real dates followed by virtual look-ahead Sundays (used to avoid ending a
-    // period in a state from which the next period cannot be scheduled strictly).
-    this.days = dates.map(toDay);
-    const last = this.days[this.days.length - 1];
-    for (let i = 1; i <= MAX_LOOKAHEAD; i++) this.days.push(last + 7 * i);
-    this.sol = new Array(this.days.length).fill(null);
-    this.prayerViol = new Array(this.days.length).fill(false);
-    this.seq = members.map(() => []);
-    this.sLog = this.days.map(() => new Set());
-    this.lastLog = this.days.map(() => []);
-    history = history.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-    const idx = new Map<number, number>();
-    members.forEach((m, i) => idx.set(m.id, i));
-    for (const w of history) {
-      const got: number[] = [];
-      ROLES.forEach((r, ri) => {
-        const id = w[r];
-        if (id == null) return;
-        const i = idx.get(id);
-        if (i === undefined) return;
-        this.role[i][ri]++;
-        this.seq[i].push(ri);
-        got.push(i);
-      });
-      const uniq = [...new Set(got)];
-      roundStep(this.inS, uniq, this.n);
-      const hd = toDay(w.date);
-      for (const x of uniq) if (hd > this.lastDay[x]) this.lastDay[x] = hd;
-      for (let a = 0; a < uniq.length; a++)
-        for (let b = a + 1; b < uniq.length; b++) this.pair[this.pk(uniq[a], uniq[b])]++;
-      const d = toDay(w.date);
-      const prev = this.histByDay.get(d) || [];
-      this.histByDay.set(d, [...new Set([...prev, ...uniq])]);
-    }
-  }
-
-  pk(a: number, b: number): number {
-    return a < b ? a * this.n + b : b * this.n + a;
-  }
-
-  /** Members who read at any event within WINDOW days before event w. */
-  prevSet(w: number): Set<number> {
-    const d = this.days[w];
-    const out = new Set<number>();
-    for (let j = w - 1; j >= 0 && this.days[j] >= d - WINDOW; j--) {
-      const s = this.sol[j];
-      if (s && this.days[j] < d) {
-        out.add(s.r1);
-        out.add(s.r2);
-        out.add(s.p);
-      }
-    }
-    for (let k = 1; k <= WINDOW; k++) for (const x of this.histByDay.get(d - k) || []) out.add(x);
-    return out;
-  }
-
-  /** True if member x's last two assignments were both prayer. */
-  prayerStreak(x: number): boolean {
-    const q = this.seq[x];
-    return q.length >= 2 && q[q.length - 1] === 2 && q[q.length - 2] === 2;
-  }
-
-  apply(w: number, s: Pick, sign: 1 | -1) {
-    const list = [s.r1, s.r2, s.p];
-    if (sign === 1) {
-      this.prayerViol[w] = this.prayerStreak(s.p);
-      this.sLog[w] = new Set(this.inS);
-      this.lastLog[w] = list.map((x) => this.lastDay[x]);
-      roundStep(this.inS, list, this.n);
-      for (const x of list) this.lastDay[x] = this.days[w];
-    } else {
-      this.inS = this.sLog[w];
-      list.forEach((x, t) => (this.lastDay[x] = this.lastLog[w][t]));
-    }
-    list.forEach((x, ri) => {
-      this.role[x][ri] += sign;
-      if (sign === 1) this.seq[x].push(ri);
-      else this.seq[x].pop();
-    });
-    this.pair[this.pk(s.r1, s.r2)] += sign;
-    this.pair[this.pk(s.r1, s.p)] += sign;
-    this.pair[this.pk(s.r2, s.p)] += sign;
-    this.sol[w] = sign === 1 ? s : null;
-  }
-
-  roleCost(x: number, ri: number): number {
-    const r = this.role[x];
-    return r[ri] - (r[0] + r[1] + r[2]) / 3;
-  }
-
-  candidates(w: number): Pick[] {
-    const { n, rng } = this;
-    // Fairness (rounds): kids not yet read this round are due and go first. With
-    // fewer than 3 due, all of them are forced and the rest come from the next round.
-    const due: number[] = [];
-    const rest: number[] = [];
-    for (let i = 0; i < n; i++) (this.inS.has(i) ? rest : due).push(i);
-    let forced: number[];
-    let partial: number[];
-    let k: number;
-    if (due.length >= 3) {
-      forced = [];
-      partial = due;
-      k = 3;
-    } else {
-      forced = due;
-      partial = rest;
-      k = 3 - due.length;
-    }
-    const prev = this.prevSet(w);
-    if (this.mode.consecHard) {
-      if (forced.some((x) => prev.has(x))) return [];
-      partial = partial.filter((x) => !prev.has(x));
-      if (partial.length < k) return [];
-    }
-    // LRU preference inside the pool: never-read first, then oldest last reading.
-    const lruRank = new Map<number, number>();
-    {
-      const byAge = partial.slice().sort((a, b) => this.lastDay[a] - this.lastDay[b] || rng() - 0.5);
-      const denom = Math.max(1, byAge.length - 1);
-      byAge.forEach((x, r) => lruRank.set(x, r / denom));
-    }
-
-    // Build k-combinations of the partial pool (enumerate or sample).
-    const combos: number[][] = [];
-    const total = binom(partial.length, k);
-    if (k === 0) combos.push([]);
-    else if (total <= COMBO_LIMIT) {
-      const rec = (start: number, acc: number[]) => {
-        if (acc.length === k) {
-          combos.push(acc.slice());
-          return;
-        }
-        for (let t = start; t < partial.length; t++) {
-          acc.push(partial[t]);
-          rec(t + 1, acc);
-          acc.pop();
-        }
-      };
-      rec(0, []);
-    } else {
-      // Stratified sampling by gender composition (a boys + k-a girls) so that
-      // scarce-gender kids are not drowned out by random sampling.
-      const ms = partial.filter((x) => this.male[x]);
-      const fs = partial.filter((x) => !this.male[x]);
-      const fM = forced.filter((x) => this.male[x]).length;
-      const fF = forced.length - fM;
-      const comps: number[] = [];
-      for (let a = 0; a <= k; a++) {
-        if (a > ms.length || k - a > fs.length) continue;
-        if (this.mode.genderHard && (fM + a === 0 || fF + k - a === 0)) continue;
-        comps.push(a);
-      }
-      const seen = new Set<string>();
-      const sample = (pool: number[], cnt: number): number[] => {
-        for (let t = 0; t < cnt; t++) {
-          const r = t + Math.floor(rng() * (pool.length - t));
-          const tmp = pool[t];
-          pool[t] = pool[r];
-          pool[r] = tmp;
-        }
-        return pool.slice(0, cnt);
-      };
-      const per = Math.ceil(COMBO_LIMIT / Math.max(1, comps.length));
-      for (const a of comps) {
-        const size = binom(ms.length, a) * binom(fs.length, k - a);
-        const want = Math.min(per, size);
-        let got = 0;
-        for (let tries = 0; got < want && tries < want * 3; tries++) {
-          const c = sample(ms, a).concat(sample(fs, k - a)).sort((x, y) => x - y);
-          const key = c.join(',');
-          if (seen.has(key)) continue;
-          seen.add(key);
-          combos.push(c);
-          got++;
-        }
-      }
-    }
-
-    const out: { pick: Pick; cost: number }[] = [];
-    for (const c of combos) {
-      const t = forced.concat(c);
-      const [a, b, d] = t;
-      const pairCost = 2 * (this.pair[this.pk(a, b)] + this.pair[this.pk(a, d)] + this.pair[this.pk(b, d)]);
-      let consecPen = 0;
-      for (const x of c) consecPen += LRU_W * lruRank.get(x)!;
-      if (this.scarcityW) {
-        let minor = 0;
-        for (const x of t) if (this.male[x] === this.minorityMale) minor++;
-        if (minor > 1) consecPen += this.scarcityW * (minor - 1);
-      }
-      if (!this.mode.consecHard) for (const x of t) if (prev.has(x)) consecPen += PENALTY;
-      let best: Pick | null = null;
-      let bestCost = Infinity;
-      for (let pi = 0; pi < 3; pi++) {
-        const p = t[pi];
-        const rs = t.filter((_, q) => q !== pi);
-        const mixed = this.male[rs[0]] !== this.male[rs[1]];
-        if (this.mode.genderHard && !mixed) {
-          continue;
-        }
-        const streak = this.prayerStreak(p);
-        if (this.mode.prayerHard && streak) continue;
-        const q = this.seq[p];
-        const prayerCost = (streak ? PENALTY : 0) + (q.length && q[q.length - 1] === 2 ? 1.5 : 0);
-        for (let o = 0; o < 2; o++) {
-          const r1 = rs[o];
-          const r2 = rs[1 - o];
-          const cost =
-            this.roleCost(r1, 0) + this.roleCost(r2, 1) + this.roleCost(p, 2) +
-            (mixed ? 0 : PENALTY) + prayerCost + rng() * 1.5;
-          if (cost < bestCost) {
-            bestCost = cost;
-            best = { r1, r2, p };
-          }
-        }
-      }
-      if (best) out.push({ pick: best, cost: bestCost + pairCost + consecPen + rng() * 2 });
-    }
-    out.sort((x, y) => x.cost - y.cost);
-    if (out.length > BRANCH || combos.length < total) this.truncated = true;
-    return out.slice(0, BRANCH).map((x) => x.pick);
-  }
-
-  dfs(w: number): boolean {
-    if (w === this.W) return true;
-    if (++this.nodes > this.budget || ((this.nodes & 63) === 0 && Date.now() > this.deadline)) {
-      this.aborted = true;
-      return false;
-    }
-    for (const c of this.candidates(w)) {
-      this.apply(w, c, 1);
-      if (this.dfs(w + 1)) return true;
-      this.apply(w, c, -1);
-      if (this.aborted) return false;
-    }
-    return false;
-  }
-
-  /** Soft-constraint issues of the real (non look-ahead) weeks; call while the solution is applied. */
-  issues(): WeekIssues[] {
-    const out: WeekIssues[] = [];
-    for (let w = 0; w < this.realW; w++) {
-      const p = this.sol[w]!;
-      const prev = this.prevSet(w);
-      out.push({
-        gender: this.male[p.r1] === this.male[p.r2],
-        consec: [p.r1, p.r2, p.p].some((x) => prev.has(x)),
-        prayer: this.prayerViol[w],
-      });
-    }
-    return out;
-  }
-
-  /** Run `restarts` randomized DFS attempts; returns best solution (fewest soft violations) or null. */
-  run(mode: Mode, budget: number, restarts: number, stopAtFirst: boolean, lookahead = 0, deadline = Infinity): { sol: Pick[]; issues: WeekIssues[] } | null {
-    this.mode = mode;
-    this.deadline = deadline;
-    this.W = this.realW + Math.min(lookahead, MAX_LOOKAHEAD);
-    let best: { sol: Pick[]; issues: WeekIssues[] } | null = null;
-    let bestPen = Infinity;
-    for (let r = 0; r < restarts; r++) {
-      this.nodes = 0;
-      this.aborted = false;
-      this.truncated = false;
-      this.budget = budget;
-      if (this.dfs(0)) {
-        const full = this.sol.slice(0, this.W) as Pick[];
-        const issues = this.issues();
-        const pen = issues.reduce((a, i) => a + (i.gender ? 1 : 0) + (i.consec ? 1 : 0) + (i.prayer ? 1 : 0), 0);
-        if (pen < bestPen) {
-          bestPen = pen;
-          best = { sol: full.slice(0, this.realW), issues };
-        }
-        for (let w = this.W - 1; w >= 0; w--) this.apply(w, full[w], -1);
-        if (stopAtFirst || pen === 0 || Date.now() > deadline) break;
-      } else if (!this.aborted && !this.truncated) {
-        break; // complete search space exhausted: no solution in this mode
-      }
-    }
-    return best;
-  }
-}
+// Relaxation order, tried per date (fairness is never relaxed): strict -> gender soft ->
+// "within 7 days" soft -> both -> everything soft (prayer streak too). The prayer
+// rule is kept hard the longest: with the other rules relaxed it can almost always
+// be met just by choosing who prays.
+const MODES: Mode[] = [
+  { genderHard: true, consecHard: true, prayerHard: true },
+  { genderHard: false, consecHard: true, prayerHard: true },
+  { genderHard: true, consecHard: false, prayerHard: true },
+  { genderHard: false, consecHard: false, prayerHard: true },
+  { genderHard: false, consecHard: false, prayerHard: false },
+];
 
 export function generateSchedule(input: GenerateInput): GenerateResult {
   const relaxed = { gender: false, consecutive: false, prayer: false };
@@ -432,44 +94,126 @@ export function generateSchedule(input: GenerateInput): GenerateResult {
       return { weeks: [], warnings, relaxed };
     }
     const firstDay = toDay(dates[0]);
-    const history = (input.history || []).filter((w) => w && typeof w.date === 'string' && toDay(w.date) < firstDay);
-    const t0 = Date.now();
+    const history = (input.history || [])
+      .filter((w) => w && typeof w.date === 'string' && toDay(w.date) < firstDay)
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     const rng = typeof input.seed === 'number' && Number.isFinite(input.seed) ? mulberry32(input.seed) : Math.random;
-    const solver = new Solver(members, history, dates, rng);
 
-    const hasM = members.some((m) => m.gender === 'M');
-    const hasF = members.some((m) => m.gender === 'F');
+    const n = members.length;
+    const male = members.map((m) => m.gender === 'M');
+    const idx = new Map(members.map((m, i) => [m.id, i] as const));
+    const lastDay = members.map(() => -Infinity);
+    const role = members.map(() => [0, 0, 0]);
+    const seq: number[][] = members.map(() => []); // roles in date order (0=r1, 1=r2, 2=prayer)
+    const events: { day: number; who: number[] }[] = [];
+    for (const w of history) {
+      const d = toDay(w.date);
+      const who: number[] = [];
+      ROLES.forEach((r, ri) => {
+        const id = w[r];
+        const i = id == null ? undefined : idx.get(id);
+        if (i === undefined) return;
+        role[i][ri]++;
+        seq[i].push(ri);
+        if (d > lastDay[i]) lastDay[i] = d;
+        who.push(i);
+      });
+      events.push({ day: d, who });
+    }
+    const streak = (x: number) => {
+      const q = seq[x];
+      return q.length >= 2 && q[q.length - 1] === 2 && q[q.length - 2] === 2;
+    };
+    const roleCost = (x: number, ri: number) => role[x][ri] - (role[x][0] + role[x][1] + role[x][2]) / 3;
+
+    const hasM = male.some(Boolean);
+    const hasF = male.some((x) => !x);
     const genderPossible = hasM && hasF;
 
-    // Relaxation order (fairness is never relaxed):
-    //   strict -> gender soft -> "within 7 days" soft -> both soft -> everything soft (prayer streak too).
-    // The prayer-streak rule is kept hard the longest because with the other rules
-    // relaxed it can almost always be met just by choosing who prays.
-    let res: { sol: Pick[]; issues: WeekIssues[] } | null = null;
-    if (genderPossible) {
-      const strict = { genderHard: true, consecHard: true, prayerHard: true };
-      const la = Math.min(MAX_LOOKAHEAD, Math.ceil(members.length / 3));
-      res = solver.run(strict, 6000, 4, true, la, t0 + 350);
-      if (!res) res = solver.run(strict, 6000, 3, true, 1, t0 + 450);
-      if (!res) res = solver.run(strict, 6000, 3, true, 0, t0 + 550);
-    }
-    if (!res) res = solver.run({ genderHard: false, consecHard: true, prayerHard: true }, 4000, 8, false, 0, t0 + 650);
-    if (!res && genderPossible) res = solver.run({ genderHard: true, consecHard: false, prayerHard: true }, 4000, 8, false, 0, t0 + 750);
-    if (!res) res = solver.run({ genderHard: false, consecHard: false, prayerHard: true }, 4000, 8, false, 0, t0 + 850);
-    // Fairness-only search always succeeds on its first descent (no hard constraint can fail).
-    if (!res) res = solver.run({ genderHard: false, consecHard: false, prayerHard: false }, 4000, 8, false, 0, t0 + 950);
-    if (!res) {
-      warnings.push('Không thể tạo lịch tự động. Vui lòng xếp thủ công.');
-      return { weeks: [], warnings, relaxed };
-    }
-    const { sol, issues } = res;
+    const weeks: GenerateResult['weeks'] = [];
+    const issues: WeekIssues[] = [];
+    for (const date of dates) {
+      const d = toDay(date);
+      // Queue: oldest lastRead first, random order within ties.
+      const tie = members.map(() => rng());
+      const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => lastDay[a] - lastDay[b] || tie[a] - tie[b]);
+      const recent = new Set<number>();
+      for (const e of events) if (e.day < d && e.day >= d - WINDOW) for (const x of e.who) recent.add(x);
 
-    const weeks = sol.map((p, w) => ({
-      date: dates[w],
-      reading1: solver.ids[p.r1],
-      reading2: solver.ids[p.r2],
-      prayer: solver.ids[p.p],
-    }));
+      /** Best role assignment of a triple under `mode` (null if a hard rule makes it impossible). */
+      const assign = (t: number[], mode: Mode): Assign | null => {
+        let consecCount = 0;
+        for (const x of t) if (recent.has(x)) consecCount++;
+        if (mode.consecHard && consecCount) return null;
+        const options: Assign[] = [];
+        for (let pi = 0; pi < 3; pi++) {
+          const p = t[pi];
+          const pStreak = streak(p);
+          if (mode.prayerHard && pStreak) continue;
+          const rs = t.filter((_, q) => q !== pi);
+          const mixed = male[rs[0]] !== male[rs[1]];
+          if (mode.genderHard && !mixed) continue;
+          for (let o = 0; o < 2; o++) {
+            const iss = { gender: !mixed, consec: consecCount > 0, prayer: pStreak };
+            options.push({ r1: rs[o], r2: rs[1 - o], p, viol: (mixed ? 0 : 1) + consecCount + (pStreak ? 1 : 0), issues: iss });
+          }
+        }
+        if (!options.length) return null;
+        const minViol = Math.min(...options.map((a) => a.viol));
+        let best: Assign | null = null;
+        let bestCost = Infinity;
+        for (const a of options) {
+          if (a.viol !== minViol) continue;
+          // soft role balance (someone with many prayers gets a reading) + randomness
+          const cost = roleCost(a.r1, 0) + roleCost(a.r2, 1) + roleCost(a.p, 2) + rng() * 1.5;
+          if (cost < bestCost) {
+            bestCost = cost;
+            best = a;
+          }
+        }
+        return best;
+      };
+
+      /** Lexicographically earliest triple (in queue order) with the fewest violations under `mode`. */
+      const bestTriple = (mode: Mode): Assign | null => {
+        const cand = mode.consecHard ? order.filter((x) => !recent.has(x)) : order;
+        const m = cand.length;
+        // Violations that no triple can avoid (lets relaxed modes stop at the first optimal triple).
+        const bothGenders = cand.some((x) => male[x]) && cand.some((x) => !male[x]);
+        if (mode.genderHard && !bothGenders) return null;
+        const lb = !mode.genderHard && !bothGenders ? 1 : 0;
+        let best: Assign | null = null;
+        for (let i = 0; i < m - 2; i++)
+          for (let j = i + 1; j < m - 1; j++)
+            for (let k = j + 1; k < m; k++) {
+              const a = assign([cand[i], cand[j], cand[k]], mode);
+              if (!a) continue;
+              if (a.viol <= lb) return a; // enumeration order = lexicographic queue order
+              if (!best || a.viol < best.viol) best = a;
+            }
+        return best;
+      };
+
+      let pick: Assign | null = null;
+      for (const mode of MODES) {
+        if (mode.genderHard && !genderPossible) continue;
+        pick = bestTriple(mode);
+        if (pick) break;
+      }
+      if (!pick) {
+        warnings.push('Không thể tạo lịch tự động. Vui lòng xếp thủ công.');
+        return { weeks: [], warnings, relaxed: { gender: false, consecutive: false, prayer: false } };
+      }
+      const list = [pick.r1, pick.r2, pick.p];
+      list.forEach((x, ri) => {
+        role[x][ri]++;
+        seq[x].push(ri);
+        lastDay[x] = d;
+      });
+      events.push({ day: d, who: list });
+      issues.push(pick.issues);
+      weeks.push({ date, reading1: members[pick.r1].id, reading2: members[pick.r2].id, prayer: members[pick.p].id });
+    }
 
     // Describe what had to be relaxed.
     const genderWeeks = dates.filter((_, w) => issues[w].gender);
@@ -507,7 +251,7 @@ export function validateSchedule(members: SchedMember[], weeks: WeekAssignment[]
   const out: Violation[] = [];
   const ms = dedupeMembers(members);
   const byId = new Map(ms.map((m) => [m.id, m] as const));
-  const S = new Set<number>(); // member ids who already read in the current round (see roundStep)
+  const lastRead = new Map<number, number>(); // member id -> day of last reading (absent = never)
   const sorted = (weeks || []).filter((w) => w && typeof w.date === 'string').slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   const byDay = new Map<number, Set<number>>();
   for (const w of sorted) {
@@ -549,6 +293,48 @@ export function validateSchedule(members: SchedMember[], weeks: WeekAssignment[]
         : `Ngày ${label}: có bạn đọc 2 lần trong vòng 7 ngày (${prevLabel} và ${label}).`;
       out.push({ date: w.date, kind: 'consecutive', message, memberIds: rep });
     }
+    // Fairness (waiting queue): picked X is unfair if an unpicked member Y has waited
+    // strictly longer (older lastRead, or never read while X has) and Y could legally
+    // take X's role this week (gender pair, within-7-days, prayer streak).
+    {
+      const older = (y: number, x: number) => (lastRead.get(y) ?? -Infinity) < (lastRead.get(x) ?? -Infinity);
+      const nearOther = (y: number) => {
+        for (let k = 1; k <= WINDOW; k++) if (byDay.get(day - k)?.has(y) || byDay.get(day + k)?.has(y)) return true;
+        return false;
+      };
+      const prayerStreak = (y: number) => {
+        const q = seqs.get(y) || [];
+        return q.length >= 2 && q[q.length - 1] === 'prayer' && q[q.length - 2] === 'prayer';
+      };
+      const offenders: number[] = [];
+      const waiting = new Set<number>();
+      for (const r of ROLES) {
+        const x = w[r];
+        if (x == null || !byId.has(x)) continue;
+        const other = r === 'reading1' ? w.reading2 : r === 'reading2' ? w.reading1 : null;
+        const otherM = other == null ? undefined : byId.get(other);
+        const ys = ms.filter((m) => {
+          const y = m.id;
+          if (present.includes(y) || !older(y, x) || nearOther(y)) return false;
+          if (r === 'prayer') return !prayerStreak(y);
+          return !otherM || otherM.gender !== m.gender;
+        });
+        if (ys.length) {
+          if (!offenders.includes(x)) offenders.push(x);
+          for (const y of ys) waiting.add(y.id);
+        }
+      }
+      if (offenders.length) {
+        const ws = [...waiting];
+        out.push({
+          date: w.date,
+          kind: 'fairness',
+          message: `Ngày ${label}: có bạn đọc trước trong khi bạn khác chờ lâu hơn.`,
+          memberIds: [...offenders, ...ws],
+          waitingIds: ws,
+        });
+      }
+    }
     // Prayer streak: a kid's own assignments, in date order.
     ROLES.forEach((r) => {
       const x = w[r];
@@ -560,23 +346,7 @@ export function validateSchedule(members: SchedMember[], weeks: WeekAssignment[]
       q.push(r);
       seqs.set(x, q);
     });
-    // Fairness (rounds): unfair iff someone who already read this round is picked
-    // while some member who is still due this round is not.
-    const picked = [...new Set(present.filter((x) => byId.has(x)))];
-    const repeaters = picked.filter((x) => S.has(x));
-    if (repeaters.length) {
-      const waiting = ms.filter((m) => !S.has(m.id) && !picked.includes(m.id)).map((m) => m.id);
-      if (waiting.length) {
-        out.push({
-          date: w.date,
-          kind: 'fairness',
-          message: `Ngày ${label}: chưa công bằng — có bạn đọc lần nữa trong khi còn bạn chưa được đọc vòng này.`,
-          memberIds: [...repeaters, ...waiting],
-          waitingIds: waiting,
-        });
-      }
-    }
-    roundStep(S, picked, ms.length);
+    for (const x of present) if (byId.has(x)) lastRead.set(x, day);
   }
   return out;
 }
@@ -587,12 +357,8 @@ export function computeStats(members: SchedMember[], weeks: WeekAssignment[]): M
   const ms = dedupeMembers(members);
   const pos = new Map(ms.map((m, i) => [m.id, i] as const));
   const stats: MemberStat[] = ms.map((m) => ({ id: m.id, total: 0, effective: 0, reading1: 0, reading2: 0, prayer: 0, lastDate: null }));
-  // effective = completed rounds + (already read in the current round ? 1 : 0)
-  const S = new Set<number>();
-  let rounds = 0;
-  const sorted = (weeks || []).filter((w) => w && typeof w.date === 'string').slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  for (const w of sorted) {
-    const picked: number[] = [];
+  for (const w of weeks || []) {
+    if (!w || typeof w.date !== 'string') continue;
     for (const r of ROLES) {
       const id = w[r];
       if (id == null) continue;
@@ -601,11 +367,11 @@ export function computeStats(members: SchedMember[], weeks: WeekAssignment[]): M
       const s = stats[i];
       s[r]++;
       s.total++;
-      if (!picked.includes(id)) picked.push(id);
       if (s.lastDate === null || w.date > s.lastDate) s.lastDate = w.date;
     }
-    if (roundStep(S, picked, ms.length)) rounds++;
   }
-  for (const s of stats) s.effective = rounds + (S.has(s.id) ? 1 : 0);
+  // effective = queue rank: how many members have waited strictly longer (never-read = longest). 0 = front.
+  const key = (s: MemberStat) => s.lastDate ?? '';
+  for (const s of stats) s.effective = stats.filter((o) => key(o) < key(s)).length;
   return stats;
 }

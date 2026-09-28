@@ -16,8 +16,9 @@ Web quản lý lịch đọc sách Chúa Nhật cho ban đọc sách thiếu nhi
 - Bài đọc 1 và 2 luôn có 1 nam 1 nữ.
 - Không em nào đọc 2 lần trong vòng 7 ngày (2 tuần liền, hoặc Chúa Nhật + ngày lễ giữa tuần).
 - Không em nào đọc Lời nguyện 3 lần liên tiếp.
-- Công bằng theo vòng: trong mỗi vòng, ai cũng được đọc 1 lần rồi mới có người đọc tiếp. Không ai bị chậm quá 1 vòng.
-- Không đọc bù: em vào ban giữa chừng (hoặc đi lại sau khi nghỉ) được coi như đã đọc đủ các vòng trước. Em chỉ vào vòng hiện tại như mọi người, không bị dồn lịch để "đuổi kịp" tổng số lần.
+- **Hàng chờ:** các em xếp theo ngày đọc gần nhất; em chờ lâu nhất (hoặc chưa đọc lần nào) đứng đầu. Mỗi tuần lấy 3 em đầu hàng. Chỉ được bỏ qua một em khi em đó vướng luật bắt buộc (thiếu nam/nữ, đọc trong vòng 7 ngày, Lời nguyện 3 lần), và em bị bỏ qua vẫn đứng đầu hàng tuần sau. Đọc xong thì về cuối hàng.
+- Nhờ vậy chưa ai đọc lần 2 khi còn em chưa đọc lần nào. Em mới vào đứng đầu hàng, đọc 1 lần rồi về cuối như mọi người, không đọc bù.
+- Phần ngẫu nhiên: xáo các em cùng vị trí trong hàng (đọc cùng ngày) và xáo vai Bài 1 / Bài 2 / Lời nguyện.
 - Để luôn đủ cặp nam–nữ, giới ít hơn nên chiếm khoảng **1/3 ban trở lên**. Ví dụ 3 nam / 15 nữ thì chắc chắn có vài tuần phải để 2 nữ đọc Bài đọc 1 & 2.
 - Nếu không thể giữ đủ luật (ví dụ ban quá ít người, hoặc toàn nữ), web vẫn chia lịch và hiện cảnh báo. Luật công bằng thì không bao giờ bị nới.
 
