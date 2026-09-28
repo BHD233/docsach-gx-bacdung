@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-be-vietnam), system-ui, sans-serif;
+  --color-brand: #b91c1c;
+  --color-brand-dark: #7f1d1d;
+  --color-sat: #dbeefb;
+  --color-sun: #fde4d4;
+  --color-ink: #1c1917;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: #f7f5f2;
+  color: var(--color-ink);
+}
+
+@utility btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+@utility btn-primary {
+    @apply btn bg-brand text-white hover:bg-brand-dark;
+  }
+
+@utility btn-ghost {
+    @apply btn border border-stone-300 bg-white text-stone-700 hover:bg-stone-100;
+  }
+
+@utility btn-danger {
+    @apply btn border border-red-200 bg-white text-red-700 hover:bg-red-50;
+  }
+
+@utility input {
+    @apply w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20;
+  }
+
+@utility label {
+    @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-stone-500;
+  }
+
+@utility card {
+    @apply rounded-2xl border border-stone-200 bg-white shadow-sm;
+  }
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: white;
+  }
+  .card {
+    box-shadow: none;
+    border: none;
+  }
+}
