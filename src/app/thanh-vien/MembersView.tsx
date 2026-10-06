@@ -31,6 +31,24 @@ function isAdminMember(m: PublicMember): m is AdminMember {
   return "active" in m;
 }
 
+type SortKey = "id" | "saintName" | "fullName" | "gender" | "className" | "phone" | "father" | "mother" | "readCount";
+type SortState = { key: SortKey; direction: "asc" | "desc" };
+const sortCollator = new Intl.Collator("vi", { numeric: true, sensitivity: "base" });
+
+function sortValue(member: PublicMember, key: SortKey): string | number {
+  switch (key) {
+    case "id": return member.id;
+    case "saintName": return member.saintName;
+    case "fullName": return member.fullName;
+    case "gender": return genderLabel(member.gender);
+    case "className": return isAdminMember(member) ? member.className : "";
+    case "phone": return isAdminMember(member) ? member.phone : "";
+    case "father": return isAdminMember(member) ? `${member.fatherName} ${member.fatherPhone}` : "";
+    case "mother": return isAdminMember(member) ? `${member.motherName} ${member.motherPhone}` : "";
+    case "readCount": return isAdminMember(member) ? member.readCount : 0;
+  }
+}
+
 export default function MembersView({
   admin,
   members,
@@ -47,6 +65,7 @@ export default function MembersView({
   const [cls, setCls] = useState("");
   const [showInactive, setShowInactive] = useState(false);
   const [editing, setEditing] = useState<AdminMember | "new" | null>(null);
+  const [sort, setSort] = useState<SortState>({ key: "id", direction: "asc" });
 
   const norm = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/gi, "d").toLowerCase();
 
@@ -63,6 +82,33 @@ export default function MembersView({
       return true;
     });
   }, [members, q, gender, cls, showInactive]);
+
+  const sortedList = useMemo(() => [...list].sort((a, b) => {
+    const aValue = sortValue(a, sort.key);
+    const bValue = sortValue(b, sort.key);
+    const order = typeof aValue === "number" && typeof bValue === "number"
+      ? aValue - bValue
+      : sortCollator.compare(String(aValue), String(bValue));
+    return (sort.direction === "asc" ? order : -order) || a.id - b.id;
+  }), [list, sort]);
+
+  function sortHeader(label: string, key: SortKey, className = "") {
+    const active = sort.key === key;
+    return (
+      <th className={`px-3 py-2.5 ${className}`} aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 text-left hover:text-stone-900"
+          onClick={() => setSort((current) => ({
+            key,
+            direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+          }))}
+        >
+          {label}<span aria-hidden="true" className="text-stone-400">{active ? (sort.direction === "asc" ? "↑" : "↓") : "↕"}</span>
+        </button>
+      </th>
+    );
+  }
 
   const activeAll = (members as PublicMember[]).filter((m) => !isAdminMember(m) || m.active);
   const boys = activeAll.filter((m) => m.gender === "M").length;
@@ -111,24 +157,24 @@ export default function MembersView({
         <table className="w-full min-w-[520px] text-left text-sm">
           <thead className="bg-stone-50 text-xs uppercase tracking-wide text-stone-500">
             <tr>
-              <th className="px-3 py-2.5">#</th>
-              <th className="px-3 py-2.5">Tên thánh</th>
-              <th className="px-3 py-2.5">Họ và tên</th>
-              <th className="px-3 py-2.5">Giới tính</th>
+              {sortHeader("#", "id")}
+              {sortHeader("Tên thánh", "saintName")}
+              {sortHeader("Họ và tên", "fullName")}
+              {sortHeader("Giới tính", "gender")}
               {admin && (
                 <>
-                  <th className="px-3 py-2.5">Lớp</th>
-                  <th className="px-3 py-2.5">SĐT em</th>
-                  <th className="px-3 py-2.5">Ba</th>
-                  <th className="px-3 py-2.5">Mẹ</th>
-                  <th className="px-3 py-2.5 text-center">Đã đọc</th>
-                  <th className="px-3 py-2.5"></th>
+                  {sortHeader("Lớp", "className")}
+                  {sortHeader("SĐT em", "phone")}
+                  {sortHeader("Ba", "father")}
+                  {sortHeader("Mẹ", "mother")}
+                  {sortHeader("Đã đọc", "readCount", "text-center")}
+                  <th className="px-3 py-2.5">Thao tác</th>
                 </>
               )}
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100">
-            {list.map((m, i) => (
+            {sortedList.map((m, i) => (
               <tr key={m.id} className={isAdminMember(m) && !m.active ? "bg-stone-50 text-stone-400" : ""}>
                 <td className="px-3 py-2.5 text-stone-400">{i + 1}</td>
                 <td className="px-3 py-2.5">{m.saintName}</td>
