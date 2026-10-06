@@ -86,11 +86,22 @@ export default function MembersView({
   const sortedList = useMemo(() => [...list].sort((a, b) => {
     const aValue = sortValue(a, sort.key);
     const bValue = sortValue(b, sort.key);
-    const order = typeof aValue === "number" && typeof bValue === "number"
-      ? aValue - bValue
-      : sortCollator.compare(String(aValue), String(bValue));
+    let order: number;
+    if (sort.key === "className" && isAdminMember(a) && isAdminMember(b)) {
+      const classRank = (member: AdminMember) => {
+        if (member.classValue === "graduated") return classes.length;
+        if (!member.classValue) return classes.length + 1;
+        const rank = classes.findIndex((level) => String(level.id) === member.classValue);
+        return rank < 0 ? classes.length + 1 : rank;
+      };
+      order = classRank(a) - classRank(b);
+    } else {
+      order = typeof aValue === "number" && typeof bValue === "number"
+        ? aValue - bValue
+        : sortCollator.compare(String(aValue), String(bValue));
+    }
     return (sort.direction === "asc" ? order : -order) || a.id - b.id;
-  }), [list, sort]);
+  }), [list, sort, classes]);
 
   function sortHeader(label: string, key: SortKey, className = "") {
     const active = sort.key === key;
