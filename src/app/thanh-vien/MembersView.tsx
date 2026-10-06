@@ -17,6 +17,7 @@ export interface AdminMember extends PublicMember {
   motherName: string;
   fatherPhone: string;
   motherPhone: string;
+  phone: string;
   note: string;
   active: boolean;
   className: string;
@@ -56,7 +57,7 @@ export default function MembersView({
       if (isAdminMember(m)) {
         if (!showInactive && !m.active) return false;
         if (cls && m.className !== cls) return false;
-        if (nq && !norm(`${m.saintName} ${m.fullName} ${m.fatherName} ${m.motherName} ${m.fatherPhone} ${m.motherPhone}`).includes(nq))
+        if (nq && !norm(`${m.saintName} ${m.fullName} ${m.phone} ${m.fatherName} ${m.motherName} ${m.fatherPhone} ${m.motherPhone}`).includes(nq))
           return false;
       } else if (nq && !norm(`${m.saintName} ${m.fullName}`).includes(nq)) return false;
       return true;
@@ -117,6 +118,7 @@ export default function MembersView({
               {admin && (
                 <>
                   <th className="px-3 py-2.5">Lớp</th>
+                  <th className="px-3 py-2.5">SĐT em</th>
                   <th className="px-3 py-2.5">Ba</th>
                   <th className="px-3 py-2.5">Mẹ</th>
                   <th className="px-3 py-2.5 text-center">Đã đọc</th>
@@ -147,6 +149,9 @@ export default function MembersView({
                   <>
                     <td className="px-3 py-2.5">{m.className || <span className="text-stone-300">—</span>}</td>
                     <td className="px-3 py-2.5">
+                      {m.phone ? <a className="text-xs text-sky-700" href={`tel:${m.phone}`}>{m.phone}</a> : <span className="text-stone-300">—</span>}
+                    </td>
+                    <td className="px-3 py-2.5">
                       <div>{m.fatherName}</div>
                       {m.fatherPhone && <a className="text-xs text-sky-700" href={`tel:${m.fatherPhone}`}>{m.fatherPhone}</a>}
                     </td>
@@ -166,7 +171,7 @@ export default function MembersView({
             ))}
             {list.length === 0 && (
               <tr>
-                <td colSpan={admin ? 9 : 4} className="px-3 py-8 text-center text-stone-500">
+                <td colSpan={admin ? 10 : 4} className="px-3 py-8 text-center text-stone-500">
                   Không có thành viên nào.
                 </td>
               </tr>
@@ -247,6 +252,7 @@ function MemberForm({
       <Field label="SĐT ba" name="fatherPhone" defaultValue={member?.fatherPhone} type="tel" />
       <Field label="Tên mẹ" name="motherName" defaultValue={member?.motherName} />
       <Field label="SĐT mẹ" name="motherPhone" defaultValue={member?.motherPhone} type="tel" />
+      <Field label="SĐT em" name="phone" defaultValue={member?.phone} type="tel" />
       <div className="sm:col-span-2">
         <label className="label">Ghi chú</label>
         <textarea name="note" className="input" rows={2} defaultValue={member?.note} />

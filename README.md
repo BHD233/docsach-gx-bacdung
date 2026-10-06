@@ -7,7 +7,7 @@ Web quản lý lịch đọc sách Chúa Nhật cho ban đọc sách thiếu nhi
 | Trang | Ai xem | Nội dung |
 |---|---|---|
 | `/` | Mọi người | Phân công Chúa Nhật tới + lịch cả tháng, in được |
-| `/thanh-vien` | Mọi người | Khách: tên thánh, họ tên, giới tính. Admin: xem/sửa toàn bộ (lớp, ba mẹ, SĐT, số lần đọc). Danh sách GLV liên hệ |
+| `/thanh-vien` | Mọi người | Khách: tên thánh, họ tên, giới tính. Admin: xem/sửa toàn bộ (lớp, SĐT em, ba mẹ, SĐT, số lần đọc). Danh sách GLV liên hệ |
 | `/admin` | Admin | Chia lịch 2 tháng: nút 🎲 chia ngẫu nhiên, gõ tên để chọn (không cần dấu), ⇄ đổi chỗ 2 người bất kỳ, thêm ngày lễ giữa tuần (Giáng Sinh, Trung Thu…), báo lỗi, thống kê |
 | `/admin/cai-dat` | Admin | Danh sách lớp theo thứ tự, tên ban, tiêu đề lịch |
 

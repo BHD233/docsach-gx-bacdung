@@ -41,7 +41,7 @@ async function createDb(): Promise<DB> {
 }
 
 // Tăng số này khi đổi cấu trúc bảng trong ddl.ts
-const SCHEMA_VERSION = "1";
+const SCHEMA_VERSION = "2";
 
 async function init(): Promise<DB> {
   const db = await createDb();

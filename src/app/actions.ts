@@ -90,6 +90,7 @@ export async function saveMember(fd: FormData) {
     motherName: str(fd, "motherName"),
     fatherPhone: str(fd, "fatherPhone"),
     motherPhone: str(fd, "motherPhone"),
+    phone: str(fd, "phone"),
     note: str(fd, "note"),
     active,
   };

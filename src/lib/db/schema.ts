@@ -15,6 +15,7 @@ export const members = pgTable("members", {
   motherName: text("mother_name").notNull().default(""),
   fatherPhone: text("father_phone").notNull().default(""),
   motherPhone: text("mother_phone").notNull().default(""),
+  phone: text("phone").notNull().default(""),
   classId: integer("class_id"),
   // Năm học (năm bắt đầu, 1/9) tại thời điểm gán classId. Lớp hiện tại = classId + số năm đã trôi qua.
   classBaseYear: integer("class_base_year"),

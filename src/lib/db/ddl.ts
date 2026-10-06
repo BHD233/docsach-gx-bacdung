@@ -14,6 +14,7 @@ export const DDL = [
     mother_name TEXT NOT NULL DEFAULT '',
     father_phone TEXT NOT NULL DEFAULT '',
     mother_phone TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
     class_id INTEGER,
     class_base_year INTEGER,
     active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -41,4 +42,5 @@ export const DDL = [
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   )`,
+  `ALTER TABLE members ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT ''`,
 ];

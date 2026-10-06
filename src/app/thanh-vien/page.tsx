@@ -31,6 +31,7 @@ export default async function MembersPage() {
         motherName: m.motherName,
         fatherPhone: m.fatherPhone,
         motherPhone: m.motherPhone,
+        phone: m.phone,
         note: m.note,
         active: m.active,
         className: cls?.name ?? "",
